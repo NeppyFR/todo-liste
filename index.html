@@ -57,7 +57,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 [hidden] { display: none !important; }
-button, input { font: inherit; color: inherit; }
+button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -171,6 +171,8 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
 .chip[data-prio="0"] { background: transparent; color: var(--muted); border: 1px dashed var(--muted); font-family: var(--font-body); }
 .task-body { min-width: 0; display: grid; gap: 2px; }
 .task-title { overflow-wrap: anywhere; font-weight: 500; }
+.task-notes { font-size: 14px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
+textarea.text-input { resize: vertical; min-height: 64px; line-height: 1.45; }
 .task-due { font-size: 13px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
 .task-due .rel.late { color: var(--p1); font-weight: 600; }
 .task-due .rel.soon { color: var(--p2); font-weight: 600; }
@@ -261,6 +263,10 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     <div class="field">
       <label class="label" for="new-title">Neue Aufgabe</label>
       <input class="text-input" id="new-title" maxlength="200" placeholder="z.&nbsp;B. Steuererklärung abgeben">
+    </div>
+    <div class="field">
+      <label class="label" for="new-notes">Notiz <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+      <textarea class="text-input" id="new-notes" maxlength="2000" rows="2" placeholder="Details, Links, Telefonnummern …"></textarea>
     </div>
     <div class="composer-row">
       <div class="field">
@@ -381,14 +387,14 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
       [0, 1, 2, 3, 4].indexOf(t.prio) !== -1 && /^\d{4}-\d{2}-\d{2}$/.test(t.due);
   }
   function toRow(t) {
-    return { id: t.id, title: t.title, prio: t.prio, due: t.due, done: !!t.done, done_at: t.doneAt || null, created_at: t.created || new Date().toISOString() };
+    return { id: t.id, title: t.title, prio: t.prio, due: t.due, notes: t.notes || "", done: !!t.done, done_at: t.doneAt || null, created_at: t.created || new Date().toISOString() };
   }
   function fromRow(r) {
-    return { id: r.id, title: r.title, prio: r.prio, due: r.due, done: r.done, doneAt: r.done_at || undefined, created: r.created_at };
+    return { id: r.id, title: r.title, prio: r.prio, due: r.due, notes: r.notes || "", done: r.done, doneAt: r.done_at || undefined, created: r.created_at };
   }
 
   async function fetchTasks() {
-    var res = await sb.from("tasks").select("id,title,prio,due,done,done_at,created_at");
+    var res = await sb.from("tasks").select("id,title,prio,due,notes,done,done_at,created_at");
     if (res.error) throw res.error;
     synced = {};
     tasks = res.data.map(function (r) { synced[r.id] = JSON.stringify(toRow(fromRow(r))); return fromRow(r); });
@@ -574,9 +580,10 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     if (!title) { err.textContent = "Bitte gib der Aufgabe einen Namen."; err.hidden = false; $("new-title").focus(); return; }
     if (!due) { err.textContent = "Bitte wähle eine Frist."; err.hidden = false; $("new-due").focus(); return; }
     err.hidden = true;
-    tasks.push({ id: uid(), title: title, prio: newPrio, due: due, done: false, created: new Date().toISOString() });
+    tasks.push({ id: uid(), title: title, prio: newPrio, due: due, notes: $("new-notes").value.trim(), done: false, created: new Date().toISOString() });
     save();
     $("new-title").value = "";
+    $("new-notes").value = "";
     $("new-title").focus();
     render();
   });
@@ -747,6 +754,12 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
       due.appendChild(rel);
     }
     body.appendChild(title); body.appendChild(due);
+    if (t.notes) {
+      var notes = document.createElement("div");
+      notes.className = "task-notes";
+      notes.textContent = t.notes;
+      body.appendChild(notes);
+    }
 
     var actions = document.createElement("div");
     actions.className = "task-actions";
@@ -780,6 +793,8 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     form.innerHTML =
       '<div class="field"><label class="label" for="' + fid + '-title">Aufgabe</label>' +
       '<input class="text-input" id="' + fid + '-title" maxlength="200"></div>' +
+      '<div class="field"><label class="label" for="' + fid + '-notes">Notiz</label>' +
+      '<textarea class="text-input" id="' + fid + '-notes" maxlength="2000" rows="3"></textarea></div>' +
       '<div class="composer-row"><div class="field"><span class="label" id="' + fid + '-plabel">Priorität</span>' +
       '<div class="prio-picker" role="group" aria-labelledby="' + fid + '-plabel"></div><div class="prio-hint"></div></div>' +
       '<div class="field"><label class="label" for="' + fid + '-due">Frist</label>' +
@@ -789,7 +804,9 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     var titleIn = form.querySelector("#" + CSS.escape(fid + "-title"));
     var dueIn = form.querySelector("#" + CSS.escape(fid + "-due"));
     var err = form.querySelector(".error");
+    var notesIn = form.querySelector("#" + CSS.escape(fid + "-notes"));
     titleIn.value = t.title;
+    notesIn.value = t.notes || "";
     dueIn.value = t.due;
     var prio = t.prio;
     buildPicker(form.querySelector(".prio-picker"), form.querySelector(".prio-hint"), prio, function (v) { prio = v; });
@@ -799,7 +816,7 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
       var title = titleIn.value.trim();
       if (!title) { err.textContent = "Der Name darf nicht leer sein."; err.hidden = false; titleIn.focus(); return; }
       if (!dueIn.value) { err.textContent = "Bitte wähle eine Frist."; err.hidden = false; dueIn.focus(); return; }
-      t.title = title; t.due = dueIn.value; t.prio = prio;
+      t.title = title; t.notes = notesIn.value.trim(); t.due = dueIn.value; t.prio = prio;
       editingId = null;
       save(); render();
     });
