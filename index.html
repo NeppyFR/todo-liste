@@ -255,7 +255,7 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     <div class="summary" id="summary" aria-live="polite"></div>
   </header>
 
-  <div class="warn" id="storage-warn" hidden>Dieser Browser erlaubt kein Speichern (privater Modus?). Aufgaben gehen beim Schliessen verloren.</div>
+  <div class="warn" id="storage-warn" hidden>Keine Verbindung zum Speicher. Änderungen werden gespeichert, sobald die Verbindung wieder da ist.</div>
 
   <form class="composer" id="add-form" novalidate>
     <div class="field">
@@ -302,7 +302,7 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   </section>
 
   <footer class="foot">
-    <span>Gespeichert in diesem Browser.</span>
+    <span>Online gespeichert, auf allen Geräten gleich.</span>
     <div class="links">
       <button class="link-btn" type="button" id="export">Sicherung herunterladen</button>
       <button class="link-btn" type="button" id="import">Sicherung laden</button>
@@ -317,14 +317,19 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   <button type="button" id="toast-action" hidden>Rückgängig</button>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 (function () {
   "use strict";
 
   // ---------- Config ----------
-  var PASSWORD = "cookiemonster:)";
-  var KEY_TASKS = "aufgaben.v1.tasks";
-  var KEY_LOGIN = "aufgaben.v1.angemeldet";
+  // Tasks live in Supabase. The password is checked by Supabase, not by this page;
+  // every visitor signs in to the same account, whose email they never see.
+  var SUPABASE_URL = "https://kylaklftldrumhepxdbx.supabase.co";
+  var SUPABASE_KEY = "sb_publishable_R0xBM7oysMhiodHLiYnJdg_EJHTuw0O";
+  var ACCOUNT_EMAIL = "aufgaben@example.com";
+  var KEY_TASKS = "aufgaben.v1.tasks";       // tasks from the old browser-only version, uploaded once
+  var KEY_REMEMBER = "aufgaben.v1.merken";
   var KEY_VIEW = "aufgaben.v1.ansicht";
 
   // 0 = optional, 1 = highest, 4 = lowest
@@ -352,22 +357,94 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     try { window[store].removeItem(key); } catch (e) { /* ignore */ }
   }
 
-  var tasks = loadTasks();
-  function loadTasks() {
-    var raw = read("localStorage", KEY_TASKS);
-    if (!raw) return [];
-    try {
-      var data = JSON.parse(raw);
-      return Array.isArray(data) ? data.filter(validTask) : [];
-    } catch (e) { return []; }
+  // The session goes to localStorage ("Angemeldet bleiben") or sessionStorage.
+  function sessionStore() {
+    return read("localStorage", KEY_REMEMBER) === "nein" ? "sessionStorage" : "localStorage";
   }
+  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      storage: {
+        getItem: function (k) { return read(sessionStore(), k); },
+        setItem: function (k, v) { write(sessionStore(), k, v); },
+        removeItem: function (k) { remove("localStorage", k); remove("sessionStorage", k); }
+      }
+    }
+  });
+
+  var tasks = [];
+  var synced = {};   // id -> JSON of the row as last confirmed by the server
+
   function validTask(t) {
     return t && typeof t.id === "string" && typeof t.title === "string" &&
       [0, 1, 2, 3, 4].indexOf(t.prio) !== -1 && /^\d{4}-\d{2}-\d{2}$/.test(t.due);
   }
+  function toRow(t) {
+    return { id: t.id, title: t.title, prio: t.prio, due: t.due, done: !!t.done, done_at: t.doneAt || null, created_at: t.created || new Date().toISOString() };
+  }
+  function fromRow(r) {
+    return { id: r.id, title: r.title, prio: r.prio, due: r.due, done: r.done, doneAt: r.done_at || undefined, created: r.created_at };
+  }
+
+  async function fetchTasks() {
+    var res = await sb.from("tasks").select("id,title,prio,due,done,done_at,created_at");
+    if (res.error) throw res.error;
+    synced = {};
+    tasks = res.data.map(function (r) { synced[r.id] = JSON.stringify(toRow(fromRow(r))); return fromRow(r); });
+  }
+
+  // save() pushes whatever differs from the server: new/changed rows are upserted, missing ones deleted.
+  var syncChain = Promise.resolve();
+  var syncing = 0;
   function save() {
-    storageOk = write("localStorage", KEY_TASKS, JSON.stringify(tasks));
-    $("storage-warn").hidden = storageOk;
+    syncing++;
+    syncChain = syncChain.then(pushChanges).catch(function (err) {
+      console.error(err);
+      $("storage-warn").hidden = false;
+    }).then(function () { syncing--; });
+    return syncChain;
+  }
+  async function pushChanges() {
+    var upserts = [], present = {};
+    tasks.forEach(function (t) {
+      var row = toRow(t), json = JSON.stringify(row);
+      present[t.id] = true;
+      if (synced[t.id] !== json) upserts.push(row);
+    });
+    var deletes = Object.keys(synced).filter(function (id) { return !present[id]; });
+    if (upserts.length) {
+      var up = await sb.from("tasks").upsert(upserts);
+      if (up.error) throw up.error;
+      upserts.forEach(function (r) { synced[r.id] = JSON.stringify(r); });
+    }
+    if (deletes.length) {
+      var del = await sb.from("tasks").delete().in("id", deletes);
+      if (del.error) throw del.error;
+      deletes.forEach(function (id) { delete synced[id]; });
+    }
+    $("storage-warn").hidden = true;
+  }
+
+  async function refresh() {
+    if (syncing || editingId || $("app-view").hidden) return;
+    // After a failed save, retry pushing local changes before pulling, so they aren't overwritten
+    if (!$("storage-warn").hidden) { await save(); if (!$("storage-warn").hidden) return; }
+    try { await fetchTasks(); $("storage-warn").hidden = true; render(); }
+    catch (e) { $("storage-warn").hidden = false; }
+  }
+
+  // Tasks saved by the earlier browser-only version get uploaded once, then forgotten.
+  function adoptLocalTasks() {
+    var raw = read("localStorage", KEY_TASKS);
+    if (!raw) return;
+    try {
+      var known = {};
+      tasks.forEach(function (t) { known[t.id] = true; });
+      var old = (JSON.parse(raw) || []).filter(validTask).filter(function (t) { return !known[t.id]; });
+      if (old.length) { tasks = tasks.concat(old); save(); }
+    } catch (e) { /* ignore broken data */ }
+    remove("localStorage", KEY_TASKS);
   }
 
   var view = { sort: "due", hideOptional: false, showDone: false };
@@ -410,15 +487,14 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   }
 
   // ---------- Login ----------
-  function isLoggedIn() {
-    return read("localStorage", KEY_LOGIN) === "ja" || read("sessionStorage", KEY_LOGIN) === "ja";
-  }
-  function showApp() {
+  async function showApp() {
     $("login-view").hidden = true;
     $("app-view").hidden = false;
     render();
-    // Ask the browser not to evict our data (Chrome/Firefox honour this; others ignore it)
-    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* ignore */ }
+    try { await fetchTasks(); $("storage-warn").hidden = true; }
+    catch (e) { $("storage-warn").hidden = false; }
+    adoptLocalTasks();
+    render();
   }
   function showLogin() {
     $("app-view").hidden = true;
@@ -427,24 +503,34 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
     $("pw").focus();
   }
 
-  $("login-form").addEventListener("submit", function (e) {
+  $("login-form").addEventListener("submit", async function (e) {
     e.preventDefault();
     var form = e.currentTarget;
-    if ($("pw").value == PASSWORD) {
-      write($("remember").checked ? "localStorage" : "sessionStorage", KEY_LOGIN, "ja");
-      $("login-error").hidden = true;
+    var btn = form.querySelector("button[type=submit]");
+    var err = $("login-error");
+    write("localStorage", KEY_REMEMBER, $("remember").checked ? "ja" : "nein");
+    btn.disabled = true;
+    btn.textContent = "Anmelden …";
+    var res = await sb.auth.signInWithPassword({ email: ACCOUNT_EMAIL, password: $("pw").value });
+    btn.disabled = false;
+    btn.textContent = "Anmelden";
+    if (!res.error) {
+      err.hidden = true;
       showApp();
-    } else {
-      $("login-error").hidden = false;
-      form.classList.remove("shake");
-      void form.offsetWidth;
-      form.classList.add("shake");
-      $("pw").select();
+      return;
     }
+    err.textContent = res.error.status === 400
+      ? "Das Passwort stimmt nicht. Versuch es noch einmal."
+      : "Anmelden hat nicht geklappt. Prüfe die Internetverbindung und versuch es noch einmal.";
+    err.hidden = false;
+    form.classList.remove("shake");
+    void form.offsetWidth;
+    form.classList.add("shake");
+    $("pw").select();
   });
-  $("logout").addEventListener("click", function () {
-    remove("localStorage", KEY_LOGIN);
-    remove("sessionStorage", KEY_LOGIN);
+  $("logout").addEventListener("click", async function () {
+    await sb.auth.signOut();
+    tasks = []; synced = {};
     showLogin();
   });
 
@@ -777,18 +863,18 @@ h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   });
 
   // ---------- Keep in sync across tabs, refresh relative dates ----------
-  window.addEventListener("storage", function (e) {
-    if (e.key === KEY_TASKS) { tasks = loadTasks(); if (!$("app-view").hidden) render(); }
-  });
+  window.addEventListener("focus", refresh);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) refresh(); });
+  setInterval(refresh, 30000);
   var lastDay = todayISO();
   setInterval(function () {
     if (todayISO() !== lastDay) { lastDay = todayISO(); if (!$("app-view").hidden && !editingId) render(); }
   }, 60000);
 
   // ---------- Start ----------
-  if (!write("localStorage", "aufgaben.v1.test", "1")) { storageOk = false; $("storage-warn").hidden = false; }
-  remove("localStorage", "aufgaben.v1.test");
-  if (isLoggedIn()) showApp(); else showLogin();
+  sb.auth.getSession().then(function (r) {
+    if (r.data && r.data.session) showApp(); else showLogin();
+  });
 })();
 </script>
 </body>

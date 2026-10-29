@@ -2,11 +2,12 @@
 
 One-file German to-do list: `index.html`. No build step, no server code.
 
-- Password: `cookiemonster:)` (a plain client-side check, not real security; anyone who reads the page source can see it).
+- Password: `cookiemonster:)`. Supabase checks it (project `todo`, account `aufgaben@example.com`); it isn't in the page source.
 - Priorities 1 (Dringend) to 4 (Niedrig), or "Optional". Every task needs a deadline (Frist).
-- Tasks are stored in the browser's `localStorage`: they stay on that device and in that browser only.
-  Clearing browsing data deletes them. Safari can also wipe them if the site isn't opened for about a week.
-  Use "Sicherung herunterladen" / "Sicherung laden" at the bottom to back up or move tasks.
+- Tasks are stored in the Supabase table `public.tasks`, so every device shows the same list.
+  Row-level security limits them to the signed-in account. Other devices pick up changes when the page regains focus or every 30 s.
+- The free Supabase project pauses after about a week without use; restore it from the Supabase dashboard (nothing is lost).
+- To change the password: Supabase dashboard → Authentication → Users → `aufgaben@example.com`.
 
 ## Host on GitHub Pages
 
